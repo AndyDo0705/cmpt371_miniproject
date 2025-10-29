@@ -1,16 +1,11 @@
-# HTTP/1.1 forward proxy with tiny cache + If-Modified-Since
-# No HTTP libs, just sockets. Non-persistent (Connection: close).
 
 import socket, threading, sys, time, re
 from urllib.parse import urlsplit
 
-BUF = 65536
-CLIENT_TO = 8
-ORIGIN_TO = 8
+BUF = 1048
 
-# url -> {"lm", "body": bytes, "headers": list[(bytes,bytes)], "ts": float}
 CACHE = {}
-CACHE_MAX_BYTES = 5 * 1024 * 1024 
+CACHE_MAX_BYTES = 5 * 1024 * 1024 # 5 MB   
 
 # helper function to retrieve data from headers
 def parse_headers(raw: bytes):
@@ -29,7 +24,7 @@ def parse_headers(raw: bytes):
     return (method, target, version), hdrs, rest
 
 def read_until_headers(sock):
-    sock.settimeout(CLIENT_TO)
+    sock.settimeout(10)
     data = b""
     while b"\r\n\r\n" not in data:
         chunk = sock.recv(BUF)
@@ -53,7 +48,7 @@ def set_or_add_header(hdrs, k: bytes, v: bytes):
     hdrs.append((k, v))
 
 def drop_hop_by_hop(hdrs):
-    # keep it simple; we also force Connection: close
+    # also force Connection: close
     out = []
     hop = {b"connection", b"proxy-connection", b"keep-alive",
            b"te", b"trailer", b"transfer-encoding", b"upgrade"}
@@ -71,8 +66,8 @@ def build_headers_line(start: bytes, hdrs):
     return blob
 
 def connect_and_forward(host, port, req_head: bytes, client_conn, body=b""):
-    with socket.create_connection((host, port), timeout=ORIGIN_TO) as origin:
-        origin.settimeout(ORIGIN_TO)
+    with socket.create_connection((host, port), timeout=10) as origin:
+        origin.settimeout(10)
         origin.sendall(req_head)
         if body:
             origin.sendall(body)
@@ -139,8 +134,8 @@ def handle_client(conn, addr):
         out_head = build_headers_line(start, oh)
 
         # Contact origin and read full response (to possibly cache)
-        with socket.create_connection((host, port), timeout=ORIGIN_TO) as origin:
-            origin.settimeout(ORIGIN_TO)
+        with socket.create_connection((host, port), timeout=10) as origin:
+            origin.settimeout(10)
             origin.sendall(out_head)
             # (GET/HEAD have no body here)
             # Read response headers
@@ -203,11 +198,6 @@ def handle_client(conn, addr):
                 if status_code == 200 and len(body_bytes) <= CACHE_MAX_BYTES:
                     CACHE[url_key] = {"lm": last_mod, "body": body_bytes, "headers": r_hdrs, "ts": time.time()}
                 elif status_code == 304 and cached:
-                    # Served cached body already? In this design we forwarded headers then body;
-                    # for a real 304 we should *not* send a body from origin;
-                    # we can append cached body to satisfy the client without re-downloading.
-                    # (Clients usually expect 200 with body; to keep it simple for the MP,
-                    # you can instead choose to convert a 304 into 200 with cached body.)
                     pass
 
     except socket.timeout:
